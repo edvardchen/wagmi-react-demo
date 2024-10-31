@@ -1,15 +1,23 @@
+import _, { chain } from "lodash";
 import * as wagmi from "@wagmi/core";
 
 const categories = ["evm", "solana", "bitcoin", "starknet", "benfen"] as const;
 export type Category = (typeof categories)[number];
 
-const uniqueKeys = categories.reduce(
-  (acc, item) => ({
-    ...acc,
-    [item]: Symbol(item),
-  }),
-  {} as { [key in Category]: symbol }
-);
+type Wallet = {
+  name: string;
+  icon: string;
+  connector: wagmi.Connector;
+  categories: Category[];
+};
+
+type Chain = {
+  name: string;
+  chainId?: string | number;
+  rpcUrl: string;
+  icon: string;
+  category: Category;
+};
 
 /**
  * controller
@@ -19,22 +27,58 @@ export type Config = {
   readonly connectors: readonly wagmi.Connector[];
 };
 
-export function createConfig({
-  evm,
-  ...rest
-}: {
+export type CreateConfigOptions = {
   evm: wagmi.CreateConfigParameters<any, any>;
-  solana?: unknown;
-}): Config {
-  const result: Config = {
-    get connectors() {
-      return result[uniqueKeys.evm]?.connectors || [];
-    },
-  };
-  if (evm) {
-    const wagmiConfig = wagmi.createConfig(evm);
-    result[uniqueKeys.evm] = wagmiConfig;
+};
+
+interface WalletController {}
+
+export function createConfig({
+  wallets,
+  chains,
+}: {
+  chains: Chain[];
+  wallets: Wallet[];
+}) {
+  const result = { __internal: new Map<Category, WalletController>() };
+
+  const chainsByCategory = _.groupBy(chains, (item) => item.category);
+
+  const walletsByCategory = _.groupBy(
+    wallets
+      .map(({ categories, ...item }) =>
+        categories.map((category) => ({ ...item, category }))
+      )
+      .flat(),
+    (item) => {
+      return item.category;
+    }
+  );
+
+  if (walletsByCategory.evm) {
+    const chains = chainsByCategory.evm;
+
+    const wagmiConfig = wagmi.createConfig({
+      // @ts-ignore
+      chains,
+      // @ts-ignore
+      connectors: walletsByCategory.evm.map((item) => item.connector),
+      transports: chains.reduce((acc, { chainId, rpcUrl }) => {
+        if (typeof chainId !== "number") {
+          throw new Error(`Expect wagmi chainId is number but got ${chainId}`);
+        }
+        return {
+          ...acc,
+          [chainId]: wagmi.http(rpcUrl),
+        };
+      }, {}),
+    });
+    result.__internal.set("evm", wagmiConfig);
   }
+
+  if (walletsByCategory.solana) {
+  }
+
   // TODO: implement other categories
   return result;
 }
@@ -44,21 +88,7 @@ export function createConfig({
  */
 export type ChainIdOrName = number | string;
 
-export function connect(
-  config: Config,
-  {
-    chain,
-    wallet,
-    category: _category,
-  }: { chain?: ChainIdOrName; category?: Category; wallet: string }
-) {
-  let category = _category;
-  if (!category) {
-    if (!chain) {
-      throw new Error("Must specify chain or category");
-    }
-    category = chainToCategory(chain);
-  }
+export function connect(config: Config, category: Category, wallet: string) {
   switch (category) {
     case "evm": {
       const wagmiConfig = config[uniqueKeys.evm];
@@ -69,7 +99,7 @@ export function connect(
         (item) => item.name === wallet
       );
       if (!connector) {
-        throw new Error(`Can't find connector for ${chain}`);
+        throw new Error(`Can't find connector for ${wallet}`);
       }
       return wagmi.connect(wagmiConfig, { connector });
     }
@@ -78,8 +108,7 @@ export function connect(
   }
 }
 
-export function disconnect(config: Config, chain: ChainIdOrName) {
-  const category = chainToCategory(chain);
+export function disconnect(config: Config, category: Category) {
   switch (category) {
     case "evm": {
       const wagmiConfig = config[uniqueKeys.evm];
@@ -93,29 +122,28 @@ export function disconnect(config: Config, chain: ChainIdOrName) {
   }
 }
 
-export function getChain(config: Config, category: Category): ChainIdOrName {
-  switch (category) {
-    case "evm": {
-      const wagmiConfig = config[uniqueKeys.evm];
-      if (!wagmiConfig) {
-        throw new Error("No config found for evm");
-      }
-      return wagmi.getChainId(wagmiConfig);
-    }
-    default:
-      throw new Error("not implemented");
-  }
-}
+// export function getChain(config: Config, category: Category): ChainIdOrName {
+//   switch (category) {
+//     case "evm": {
+//       const wagmiConfig = config[uniqueKeys.evm];
+//       if (!wagmiConfig) {
+//         throw new Error("No config found for evm");
+//       }
+//       return wagmi.getChainId(wagmiConfig);
+//     }
+//     default:
+//       throw new Error("not implemented");
+//   }
+// }
 
-export function getAccount(config: Config, chain: ChainIdOrName) {
-  const category = chainToCategory(chain);
+export function getAccount(config: Config, category: Category) {
   switch (category) {
     case "evm": {
       const wagmiConfig = config[uniqueKeys.evm];
       if (!wagmiConfig) {
         throw new Error("No config found for evm");
       }
-      return wagmi.getChainId(wagmiConfig);
+      return wagmi.getAccount(wagmiConfig);
     }
     default:
       throw new Error("not implemented");
@@ -142,10 +170,9 @@ export function switchChain(config: Config, chain: ChainIdOrName) {
 
 export function signMessage(
   config: Config,
-  chain: ChainIdOrName,
-  payload: { message: string }
+  category: Category,
+  message: string
 ) {
-  const category = chainToCategory(chain);
   switch (category) {
     case "evm": {
       const wagmiConfig = config[uniqueKeys.evm];
@@ -164,26 +191,16 @@ export function signMessage(
 
 export function sendTransaction(
   config: Config,
-  chain: ChainIdOrName,
-  payload: {
-    to: any;
-    value: any;
-  }
+  category: Category,
+  payload: unknown
 ) {
-  const category = chainToCategory(chain);
   switch (category) {
     case "evm": {
       const wagmiConfig = config[uniqueKeys.evm];
       if (!wagmiConfig) {
         throw new Error("No config found for evm");
       }
-      if (typeof chain !== "number") {
-        throw new Error("unreachable");
-      }
-      return wagmi.sendTransaction(wagmiConfig, {
-        ...payload,
-        chainId: chain,
-      });
+      return wagmi.sendTransaction(wagmiConfig, payload);
     }
     default:
       throw new Error("not implemented");
@@ -192,11 +209,7 @@ export function sendTransaction(
 
 export function watchAccount(
   config: Config,
-  {
-    onChange,
-  }: {
-    onChange(account: any, preAccount: any): void;
-  }
+  onChange: (account: any, preAccount: any) => void
 ) {
   const unwatchList: (() => void)[] = [];
   if (config[uniqueKeys.evm]) {
@@ -209,12 +222,6 @@ export function watchAccount(
   };
 }
 
-// 目前代码里面没有用到，暂时不实现
-// export function watchChain(config: Config) {}
-
-// 目前代码里面没有用到，暂时不实现
-// export function watchConnection(config: Config) {}
-
 // ─── Internal Methods ────────────────────────────────────────────────────────
 function chainToCategory(chain: ChainIdOrName): Category {
   if (typeof chain === "number") return "evm";
@@ -222,3 +229,49 @@ function chainToCategory(chain: ChainIdOrName): Category {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+
+//
+// createConfig 应该接收链的配置和wallet的配置
+// chains = [
+//   {
+//     name: "BaseMainnet",
+//     chainId: "8453",
+//     rpcUrl: "https://mainnet.base.org",
+//     icon: "https://base.org/icon.png",
+//     category: "Evm",
+//   },
+//   {
+//     name: "EthereumMainnet",
+//     chainId: "1",
+//     rpcUrl: "https://mainnet.ethereum.org",
+//     icon: "https://ethereum.org/icon.png",
+//     category: "Evm",
+//   },
+//   {
+//     name: "SolanaMainnet",
+//     rpcUrl: "https://mainnet.solana.org",
+//     icon: "https://solana.org/icon.png",
+//     category: "Solana",
+//   },
+// ]
+//
+// const wallets = [
+//   {
+//     name: "MetaMask",
+//     icon: "https://metamask.io/icon.png",
+//     connector: metaMask,
+//     category: ["Evm"],
+//   },
+//   {
+//     name: "Fantom",
+//     icon: "https://fantom.foundation/icon.png",
+//     connector: fantom,
+//     category: ["Evm", "Solana"],
+//   },
+// ]
+//
+// const owlletConfig = createConfig(chains, wallets)
+//
+// chains, wallets
+
+function createSolanaConfig() {}
